@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>理解小模型训推平台：Go-Zero与Docker — Lulu Lennon</title>
+  <meta name="description" content="面向算法同学讲清楚小模型训推平台：Go-Zero 负责调度，镜像负责环境，容器负责隔离运行，Runtime 是脚本跑起来的整套依赖。">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../css/style.css">
+  <style>
+    /* ===== 架构图（本文专用） ===== */
+    .arch {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 28px 24px;
+      margin: 24px 0 8px;
+    }
+    .arch figcaption {
+      margin-top: 14px;
+      text-align: center;
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      color: var(--text-dim);
+    }
+
+    .arch-node {
+      text-align: center;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 16px;
+      background: rgba(17, 22, 31, 0.9);
+    }
+    .arch-node .arch-title { font-weight: 600; font-size: 0.95rem; }
+    .arch-node .arch-desc { display: block; margin-top: 4px; font-size: 0.8rem; color: var(--text-dim); }
+
+    .arch-node--frontend { border-color: rgba(88, 166, 255, 0.45); }
+    .arch-node--frontend .arch-title { color: var(--accent); }
+    .arch-node--storage { border-color: rgba(63, 185, 80, 0.45); }
+    .arch-node--storage .arch-title { color: #3fb950; }
+
+    .arch-cluster {
+      border-radius: 12px;
+      padding: 14px 16px 16px;
+    }
+    .arch-cluster--gozero {
+      border: 1px solid rgba(88, 166, 255, 0.4);
+      background: rgba(88, 166, 255, 0.05);
+    }
+    .arch-cluster--docker {
+      border: 1px solid rgba(188, 140, 255, 0.4);
+      background: rgba(188, 140, 255, 0.05);
+    }
+
+    .arch-cluster-head {
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .arch-cluster-head strong { font-size: 0.95rem; }
+    .arch-cluster--gozero .arch-cluster-head strong { color: var(--accent); }
+    .arch-cluster--docker .arch-cluster-head strong { color: var(--accent-2); }
+    .arch-cluster-head em { font-style: normal; font-size: 0.78rem; color: var(--text-dim); }
+
+    .arch-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+    .arch-chip {
+      text-align: center;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      padding: 8px 6px;
+      border-radius: 8px;
+      border: 1px solid rgba(88, 166, 255, 0.3);
+      background: rgba(10, 14, 20, 0.6);
+      color: var(--text);
+    }
+    .arch-chip--hl { border-color: var(--accent); color: var(--accent); }
+
+    .arch-image {
+      border: 1px dashed rgba(188, 140, 255, 0.55);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      margin-bottom: 12px;
+      color: var(--text);
+    }
+    .arch-image-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 6px;
+    }
+    .arch-image-title code { font-weight: 600; }
+    .arch-badge {
+      font-size: 0.68rem;
+      border-radius: 999px;
+      padding: 1px 8px;
+      color: var(--accent-2);
+      border: 1px solid rgba(188, 140, 255, 0.4);
+    }
+    .arch-image ul {
+      margin-left: 18px;
+      color: var(--text-dim);
+      font-size: 0.75rem;
+    }
+
+    .arch-containers { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .arch-container {
+      border: 1px solid rgba(188, 140, 255, 0.4);
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: rgba(10, 14, 20, 0.6);
+    }
+    .arch-container .arch-c-title { font-size: 0.85rem; font-weight: 600; }
+    .arch-container .arch-c-desc { display: block; margin-top: 4px; font-size: 0.75rem; color: var(--text-dim); }
+    .arch-note {
+      margin-top: 10px;
+      text-align: center;
+      font-size: 0.75rem;
+      color: var(--text-dim);
+    }
+
+    .arch-arrow {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin: 6px 0;
+    }
+    .arch-arrow-label {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      margin-bottom: 2px;
+    }
+    .arch-arrow-stem {
+      width: 2px;
+      height: 18px;
+      background: var(--accent);
+      position: relative;
+    }
+    .arch-arrow-stem::after {
+      content: "";
+      position: absolute;
+      bottom: -5px;
+      left: 50%;
+      transform: translateX(-50%);
+      border: 5px solid transparent;
+      border-top-color: var(--accent);
+    }
+
+    /* ===== 角色对照表 ===== */
+    .role-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 20px 0;
+      font-size: 0.9rem;
+    }
+    .role-table th, .role-table td {
+      border: 1px solid var(--border);
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .role-table th {
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      background: var(--bg-elevated);
+    }
+    .role-table td:first-child { white-space: nowrap; font-weight: 600; }
+    .role-table code { white-space: nowrap; }
+
+    @media (max-width: 640px) {
+      .arch-row { grid-template-columns: repeat(2, 1fr); }
+      .arch-containers { grid-template-columns: 1fr; }
+      .role-table { font-size: 0.82rem; }
+      .role-table th, .role-table td { padding: 8px; }
+    }
+  </style>
+</head>
+<body>
+
+  <header class="nav">
+    <div class="container nav-inner">
+      <a href="../index.html" class="logo">lulu<span>.dev</span></a>
+      <nav class="nav-links">
+        <a href="../index.html#insights">Insights</a>
+        <a href="../index.html#about">关于</a>
+        <a href="https://github.com/lululennon" target="_blank" rel="noopener">GitHub ↗</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="article">
+    <a href="../index.html#insights" class="back-link">← 返回列表</a>
+
+    <header class="article-header">
+      <div class="post-meta">
+        <span class="tag">架构</span>
+        <time datetime="2026-10-30">2026-10-30</time>
+      </div>
+      <h1 class="article-title">理解小模型训推平台：Go-Zero与Docker</h1>
+      <div class="article-meta"><span>约 10 分钟</span><span>·</span><span>Lulu Lennon</span></div>
+    </header>
+
+    <div class="article-body">
+      <p>你平时写 <code>train_runner.py</code>、<code>infer_runner.py</code>，关心的只是模型、数据集和指标。但这份代码最终是怎么在平台上跑起来的？任务是怎么被调度的？为什么环境永远不会乱？</p>
+      <p>这篇文章用一个统一的例子把整条链路串起来：<strong>基于 Go-Zero 微服务搭建的小模型训推平台</strong>。目标是看完就能看懂我们这套标注 / 训练 / 评测平台的骨架，不需要深挖底层代码。</p>
+
+      <h2>先认识四个核心角色</h2>
+      <table class="role-table">
+        <thead>
+          <tr><th>角色</th><th>是什么</th><th>类比</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Go-Zero</td>
+            <td>Go 语言微服务框架，用来写平台的「调度管家」：接收前端请求、管理任务状态、下发指令。它本身<strong>不跑模型训练</strong>。</td>
+            <td>项目经理——只派活、盯进度、记录结果，不亲自写训练代码。</td>
+          </tr>
+          <tr>
+            <td>镜像（Image）</td>
+            <td>一份静态只读的环境模板，打包好「Python + Torch + 训练脚本 + 全部依赖」。</td>
+            <td>标准化的「训练工作站装机 U 盘」——预装所有软件，只读、可复制分发。</td>
+          </tr>
+          <tr>
+            <td>容器（Container）</td>
+            <td>镜像启动之后正在运行的隔离实例。一个镜像可以同时变出很多个容器，互不干扰。</td>
+            <td>用这个 U 盘启动起来的一台独立工作站，用完可以关机销毁。</td>
+          </tr>
+          <tr>
+            <td>Runtime（运行时）</td>
+            <td>程序跑起来的整套环境：Python 解释器、torch、GPU 驱动、文件系统、进程资源。</td>
+            <td>工作站开机之后，一切能让代码跑起来的东西。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>平台架构总览</h2>
+      <p>自上而下四层：前端负责交互，Go-Zero 集群负责调度，Docker 引擎负责按镜像创建容器，外部存储负责保存产物。</p>
+
+      <figure class="arch">
+        <div class="arch-node arch-node--frontend">
+          <span class="arch-title">浏览器前端 SPA</span>
+          <span class="arch-desc">选数据集 · 提交训练任务 · 查看结果</span>
+        </div>
+
+        <div class="arch-arrow">
+          <span class="arch-arrow-label">HTTPS 请求</span>
+          <span class="arch-arrow-stem"></span>
+        </div>
+
+        <div class="arch-cluster arch-cluster--gozero">
+          <div class="arch-cluster-head">
+            <strong>Go-Zero 微服务集群</strong>
+            <em>常驻控制面 · 一直在线 · 只调度，不跑训练</em>
+          </div>
+          <div class="arch-row">
+            <div class="arch-chip">Dataset 服务</div>
+            <div class="arch-chip arch-chip--hl">Training 服务</div>
+            <div class="arch-chip">Inference 服务</div>
+            <div class="arch-chip">Result 服务</div>
+          </div>
+        </div>
+
+        <div class="arch-arrow">
+          <span class="arch-arrow-label">下发指令：启动训练任务</span>
+          <span class="arch-arrow-stem"></span>
+        </div>
+
+        <div class="arch-cluster arch-cluster--docker">
+          <div class="arch-cluster-head">
+            <strong>Docker 引擎</strong>
+            <em>根据镜像创建并管理容器</em>
+          </div>
+
+          <div class="arch-image">
+            <div class="arch-image-title">
+              <code>ai-runner:v1</code>
+              <span class="arch-badge">镜像 · 只读模板 · 静态</span>
+            </div>
+            <ul>
+              <li>python3</li>
+              <li>torch 及全部依赖包</li>
+              <li>train_runner.py / infer_runner.py</li>
+            </ul>
+          </div>
+
+          <div class="arch-containers">
+            <div class="arch-container">
+              <span class="arch-c-title">容器 1（训练任务 1）</span>
+              <span class="arch-c-desc">独立读写层 upperdir</span>
+            </div>
+            <div class="arch-container">
+              <span class="arch-c-title">容器 2（训练任务 2）</span>
+              <span class="arch-c-desc">独立读写层 upperdir</span>
+            </div>
+          </div>
+          <div class="arch-note">两个容器基于同一个镜像实例化，互相隔离、并行训练</div>
+        </div>
+
+        <div class="arch-arrow">
+          <span class="arch-arrow-label">写产物（ckpt / 日志 / 指标）</span>
+          <span class="arch-arrow-stem"></span>
+        </div>
+
+        <div class="arch-node arch-node--storage">
+          <span class="arch-title">挂载的外部存储（Volume / NFS）</span>
+          <span class="arch-desc">产物持久化 · 容器删了，数据还在</span>
+        </div>
+
+        <figcaption>小模型训推平台：一次训练任务的完整链路</figcaption>
+      </figure>
+
+      <h2>提交一次训练任务，整条链路会发生什么</h2>
+      <ol>
+        <li>你在前端页面填写训练参数，提交任务。</li>
+        <li>请求发到 <strong>Go-Zero 的 Training 服务（调度管家）</strong>：
+          <ul>
+            <li>校验参数，在数据库新建一条任务记录，状态标记为「待运行」；</li>
+            <li>调用 Docker 引擎接口，下发指令：使用镜像 <code>ai-runner:v1</code> 启动一个容器。</li>
+          </ul>
+          <p>到这里 Go-Zero 的活就干完了——<strong>它不执行任何训练代码</strong>，只负责调度和状态管理。</p>
+        </li>
+        <li>Docker 引擎找到静态镜像 <code>ai-runner:v1</code>，实例化出一个<strong>容器</strong>：
+          <ul>
+            <li>镜像底层是只读层，所有训练容器共享这一份模板，不会重复拷贝 torch 这类大依赖；</li>
+            <li>给这个容器单独分配一层薄薄的<strong>可读写层（upperdir）</strong>。</li>
+          </ul>
+        </li>
+        <li>容器启动，进入 Runtime，执行 <code>python train_runner.py</code>：读代码、加载数据集、前向反向传播、训练模型。
+          <ul>
+            <li>✅ 绝大多数写操作：<strong>新增训练产物</strong>（权重 ckpt、日志、评测指标）；</li>
+            <li>👉 工程规范：产物不要写进容器自带的读写层，而是挂载外部存储卷，防止容器销毁后数据丢失；</li>
+            <li>少量隐式写：Python 自动生成的 pyc 缓存、临时文件。</li>
+          </ul>
+        </li>
+        <li>训练跑完，脚本把最终结果写入数据库；Docker 停止并销毁这个容器。
+          <ul>
+            <li>容器的读写层跟着消失；</li>
+            <li><strong>原始镜像 <code>ai-runner:v1</code> 完好无损</strong>，可以继续跑下一批任务。</li>
+          </ul>
+        </li>
+        <li>前端通过 Result 服务查询数据库，展示训练指标、下载模型。</li>
+      </ol>
+
+      <h2>算法同学最容易疑惑的四个点</h2>
+
+      <h3>1. 镜像 vs 容器：类和实例</h3>
+      <p>镜像是蓝图，静态、只读、不占 CPU 内存；容器是这份蓝图跑起来的运行实例。同一个 <code>ai-runner:v1</code> 镜像可以同时启动 N 个训练容器，并行跑多组实验——环境完全一致、互不干扰。</p>
+      <blockquote>
+        <strong>底层原理：OverlayFS + 写时复制。</strong>
+        镜像的依赖文件是共享只读层，容器启动时<strong>不会复制一整份 torch 环境</strong>；
+        只有修改镜像内部原有文件时，才会把这个文件单独拷贝到容器的读写层。
+        正常训练场景几乎不会修改镜像内的脚本，写操作基本都是新增产物文件。
+      </blockquote>
+
+      <h3>2. Go-Zero 是干嘛的？为什么不直接跑 Python？</h3>
+      <ul>
+        <li>算法同学的 Python 脚本是<strong>计算负载</strong>：一次性任务，跑完就结束；</li>
+        <li>Go-Zero 微服务是<strong>平台控制面</strong>：常驻后台，负责接收请求、权限、任务排队、状态管理、结果查询。</li>
+      </ul>
+      <p>拆开的好处：训练任务可以弹性扩缩容，推理压力大就多开推理容器；某个服务挂了（比如数据集服务），不会影响正在跑的训练。</p>
+
+      <h3>3. Runtime 到底是什么？</h3>
+      <p>就是容器里面让你的 <code>train_runner.py</code> 能正常跑起来的全部环境：Python 版本、torch、CUDA、依赖包、环境变量、文件目录。Docker 镜像存在的意义，就是把这套 Runtime 打包固定下来，解决那个经典问题：<strong>「本地能跑，服务器环境不一致跑不起来」</strong>。</p>
+
+      <h3>4. 「写操作」到底写在哪里？</h3>
+      <ul>
+        <li>✅ 绝大多数写：产出新文件（模型权重、日志、预测结果）；</li>
+        <li>⚠️ 少量隐式写：Python 缓存、系统临时文件；</li>
+        <li>❌ 正常实验流程<strong>不会修改镜像里原始的 train_runner.py</strong>，也就不会触发写时复制。</li>
+      </ul>
+
+      <h2>常见误区 Q&amp;A</h2>
+
+      <h3>Q1：每跑一个训练任务，就要复制一份几十 G 的 torch 环境吗？</h3>
+      <p>不是。镜像层共享，多个容器共用同一份依赖，磁盘只存一份，容器启动也很快。</p>
+
+      <h3>Q2：容器删掉，训练好的模型权重就没了？</h3>
+      <p>看写在哪。写在容器内部读写层会丢；挂载外部存储卷，产物独立保存，不受容器生命周期影响。</p>
+
+      <h3>Q3：Go-Zero 里面有训练代码吗？</h3>
+      <p>没有。Go-Zero 只负责调度，训练代码全部放在独立镜像里，在临时容器中运行。</p>
+
+      <h3>Q4：我改了 train_runner.py，正在跑的容器会受影响吗？</h3>
+      <p>不会。需要重新 build 出新镜像，新任务才会用上新版本；正在运行的容器使用的是启动时的镜像快照。</p>
+
+      <h2>一句话总结</h2>
+      <p>Go-Zero 是平台的调度大脑，Docker 镜像是固定好的算法环境包，容器是每次实验临时启动的隔离运行环境，Runtime 是脚本跑起来需要的整套依赖。你的训练脚本在容器的 Runtime 里执行，产出的模型和数据放到外部存储——容器用完即毁，环境永远不乱。</p>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="container footer-inner">
+      <p>© 2026 Lulu Lennon · Built with plain HTML &amp; CSS</p>
+      <a href="../index.html">← 回到首页</a>
+    </div>
+  </footer>
+
+  <script src="../js/main.js"></script>
+</body>
+</html>
